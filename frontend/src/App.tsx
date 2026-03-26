@@ -9,6 +9,7 @@ import Layout from './components/Layout';
 import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import ForgotPassword from './pages/ForgotPassword';
 import CustomerDashboard from './pages/CustomerDashboard';
 import DriverDashboard from './pages/DriverDashboard';
 import AdminDashboard from './pages/AdminDashboard';
@@ -62,6 +63,7 @@ export default function App() {
           <Route index element={<Landing />} />
           <Route path="login" element={<Login />} />
           <Route path="register" element={<Register />} />
+          <Route path="forgot-password" element={<ForgotPassword />} />
           <Route path="tracking/:id" element={<Tracking />} />
           <Route path="orders/:id" element={
             <ProtectedRoute allowedRoles={['customer', 'driver', ...ADMIN_ROLES, ...SUPER_ADMIN_ROLES, ...DISPATCHER_ROLES]}>

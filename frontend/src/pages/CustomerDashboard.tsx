@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Package, MapPin, Phone, DollarSign, Clock, CheckCircle, Store, ChevronRight, Wallet, Award, Gift } from 'lucide-react';
+import { Package, MapPin, Phone, DollarSign, Clock, Bell } from 'lucide-react';
 import { formatShortDate, formatCurrency, apiFetch } from '../lib/api';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import ParcelCalculator from '../components/ParcelCalculator';
 import { Button } from '../components/ui/Button';
 import { useToast } from '../components/ui/Toast';
@@ -19,19 +19,29 @@ const STATUS_COLORS: Record<string, string> = {
   failed: 'bg-red-100 text-red-800 border-red-200',
 };
 
+const HISTORY_STATUSES = ['confirmed', 'driver_assigned', 'picked_up', 'in_transit', 'delivered', 'completed', 'cancelled', 'returned', 'failed'];
+
+const dedupeNotifications = (items: any[]) => {
+  const seen = new Set<string>();
+  const deduped: any[] = [];
+  for (const item of items || []) {
+    const timestamp = item?.created_at ? new Date(item.created_at).toISOString().slice(0, 16) : '';
+    const key = `${item?.type || ''}|${item?.title || ''}|${item?.body || ''}|${timestamp}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+  return deduped;
+};
+
 export default function CustomerDashboard() {
   const [orders, setOrders] = useState<any[]>([]);
   const [addresses, setAddresses] = useState<any[]>([]);
-  const [wallet, setWallet] = useState<any>({ balance: 0 });
-  const [rewards, setRewards] = useState<any>({ points: 0 });
-  const [walletTx, setWalletTx] = useState<any[]>([]);
-  const [rewardTx, setRewardTx] = useState<any[]>([]);
-  const [topupAmount, setTopupAmount] = useState('200');
   const [prefs, setPrefs] = useState({ inapp: true, sms: true, email: true });
   const [notifications, setNotifications] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
-  const [activeTab, setActiveTab] = useState<'home' | 'history' | 'addresses' | 'preferences' | 'wallet' | 'loyalty'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'history' | 'addresses' | 'preferences'>('home');
   const [statusFilter, setStatusFilter] = useState('all');
   const [newAddress, setNewAddress] = useState({ label: '', address: '' });
   const navigate = useNavigate();
@@ -39,18 +49,12 @@ export default function CustomerDashboard() {
 
   const fetchAll = async () => {
     try {
-      const [ordersData, addressData, walletData, rewardsData] = await Promise.all([
+      const [ordersData, addressData] = await Promise.all([
         apiFetch('/api/orders'),
         apiFetch('/api/addresses'),
-        apiFetch('/api/wallet'),
-        apiFetch('/api/rewards'),
       ]);
       setOrders(ordersData);
       setAddresses(addressData);
-      setWallet(walletData.wallet);
-      setWalletTx(walletData.transactions || []);
-      setRewards(rewardsData.rewards);
-      setRewardTx(rewardsData.transactions || []);
 
       const [prefData, notifData] = await Promise.all([
         apiFetch('/api/notifications/preferences'),
@@ -61,7 +65,7 @@ export default function CustomerDashboard() {
         sms: prefData.sms === 1 || prefData.sms === true,
         email: prefData.email === 1 || prefData.email === true,
       });
-      setNotifications(notifData || []);
+      setNotifications(dedupeNotifications(notifData || []));
     } catch (error) {
       toast.push({ title: 'Unable to load dashboard', description: 'Please refresh and try again.', variant: 'error' });
     } finally {
@@ -89,7 +93,7 @@ export default function CustomerDashboard() {
           packageWeight: Number(data.weight),
           serviceType: data.serviceType,
           notes: data.notes,
-          insurance: data.hasInsurance,
+          insurance: false,
           promoCode: data.promoCode,
           scheduleType: data.serviceType === 'scheduled' ? 'scheduled' : 'now',
           scheduledTime: data.scheduledTime || null,
@@ -104,25 +108,33 @@ export default function CustomerDashboard() {
     }
   };
 
+  const hasOrderHistory = useMemo(
+    () => orders.some((order) => HISTORY_STATUSES.includes(order.status)),
+    [orders]
+  );
+
+  const historyOrders = useMemo(
+    () => orders.filter((order) => HISTORY_STATUSES.includes(order.status)),
+    [orders]
+  );
+
   const filteredOrders = useMemo(() => {
-    if (statusFilter === 'all') return orders;
-    return orders.filter((order) => order.status === statusFilter);
-  }, [orders, statusFilter]);
+    if (statusFilter === 'all') return historyOrders;
+    return historyOrders.filter((order) => order.status === statusFilter);
+  }, [historyOrders, statusFilter]);
+
+  const unreadNotifications = useMemo(
+    () => notifications.filter((notification) => !(notification.is_read === true || notification.is_read === 1)),
+    [notifications]
+  );
 
   const defaultAddress = addresses.find((addr) => addr.is_default === 1);
 
-  const handleTopup = async () => {
-    try {
-      await apiFetch('/api/wallet/topup', {
-        method: 'POST',
-        body: JSON.stringify({ amount: Number(topupAmount), method: 'card' }),
-      });
-      toast.push({ title: 'Wallet topped up', variant: 'success' });
-      fetchAll();
-    } catch (error: any) {
-      toast.push({ title: 'Top up failed', description: error.error || '', variant: 'error' });
+  useEffect(() => {
+    if (!hasOrderHistory && activeTab === 'history') {
+      setActiveTab('home');
     }
-  };
+  }, [hasOrderHistory, activeTab]);
 
   const savePreferences = async () => {
     try {
@@ -141,7 +153,7 @@ export default function CustomerDashboard() {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-3xl font-bold text-[#2A1B7A]">Customer Dashboard</h1>
-          <p className="text-gray-500">Manage deliveries, wallet, and saved addresses.</p>
+          <p className="text-gray-500">Manage deliveries, notifications, and saved addresses.</p>
         </div>
         <Button onClick={() => setIsCreating(!isCreating)} className="bg-[#F28C3A] hover:bg-[#F28C3A]/90 rounded-xl h-12 px-6">
           {isCreating ? 'Cancel Request' : 'New Delivery Request'}
@@ -150,9 +162,9 @@ export default function CustomerDashboard() {
 
       <div className="flex gap-4 border-b border-gray-200 overflow-x-auto pb-2">
         <button onClick={() => setActiveTab('home')} className={`pb-2 font-medium whitespace-nowrap ${activeTab === 'home' ? 'text-[#2A1B7A] border-b-2 border-[#2A1B7A]' : 'text-gray-500 hover:text-gray-700'}`}>Home</button>
-        <button onClick={() => setActiveTab('history')} className={`pb-2 font-medium whitespace-nowrap ${activeTab === 'history' ? 'text-[#2A1B7A] border-b-2 border-[#2A1B7A]' : 'text-gray-500 hover:text-gray-700'}`}>Order History</button>
-        <button onClick={() => setActiveTab('wallet')} className={`pb-2 font-medium whitespace-nowrap ${activeTab === 'wallet' ? 'text-[#2A1B7A] border-b-2 border-[#2A1B7A]' : 'text-gray-500 hover:text-gray-700'}`}>Wallet</button>
-        <button onClick={() => setActiveTab('loyalty')} className={`pb-2 font-medium whitespace-nowrap ${activeTab === 'loyalty' ? 'text-[#2A1B7A] border-b-2 border-[#2A1B7A]' : 'text-gray-500 hover:text-gray-700'}`}>Rewards</button>
+        {hasOrderHistory && (
+          <button onClick={() => setActiveTab('history')} className={`pb-2 font-medium whitespace-nowrap ${activeTab === 'history' ? 'text-[#2A1B7A] border-b-2 border-[#2A1B7A]' : 'text-gray-500 hover:text-gray-700'}`}>Order History</button>
+        )}
         <button onClick={() => setActiveTab('addresses')} className={`pb-2 font-medium whitespace-nowrap ${activeTab === 'addresses' ? 'text-[#2A1B7A] border-b-2 border-[#2A1B7A]' : 'text-gray-500 hover:text-gray-700'}`}>Saved Addresses</button>
         <button onClick={() => setActiveTab('preferences')} className={`pb-2 font-medium whitespace-nowrap ${activeTab === 'preferences' ? 'text-[#2A1B7A] border-b-2 border-[#2A1B7A]' : 'text-gray-500 hover:text-gray-700'}`}>Preferences</button>
       </div>
@@ -165,16 +177,6 @@ export default function CustomerDashboard() {
 
       {activeTab === 'home' && !isCreating && (
         <div className="space-y-8">
-          <div className="bg-gradient-to-r from-[#2A1B7A] to-[#F28C3A] rounded-3xl p-8 text-white flex flex-col md:flex-row items-center justify-between gap-6 shadow-lg">
-            <div className="space-y-2">
-              <h2 className="text-2xl font-bold">Track every parcel in real time</h2>
-              <p className="text-white/80">We&apos;ll notify you at every status change.</p>
-            </div>
-            <Button onClick={() => setIsCreating(true)} className="bg-white text-[#2A1B7A] hover:bg-gray-100 rounded-xl px-6 py-3 font-bold whitespace-nowrap">
-              Create Delivery
-            </Button>
-          </div>
-
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-2">
               <div className="flex items-center gap-3">
@@ -185,39 +187,21 @@ export default function CustomerDashboard() {
             </div>
             <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-2">
               <div className="flex items-center gap-3">
-                <Wallet className="h-6 w-6 text-[#F28C3A]" />
-                <span className="font-semibold text-[#2A1B7A]">Wallet Balance</span>
+                <MapPin className="h-6 w-6 text-[#F28C3A]" />
+                <span className="font-semibold text-[#2A1B7A]">Saved Addresses</span>
               </div>
-              <p className="text-2xl font-bold text-gray-800">{formatCurrency(wallet.balance || 0)}</p>
+              <p className="text-2xl font-bold text-gray-800">{addresses.length}</p>
             </div>
             <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-2">
               <div className="flex items-center gap-3">
-                <Award className="h-6 w-6 text-[#F28C3A]" />
-                <span className="font-semibold text-[#2A1B7A]">Reward Points</span>
+                <Bell className="h-6 w-6 text-[#F28C3A]" />
+                <span className="font-semibold text-[#2A1B7A]">Unread Alerts</span>
               </div>
-              <p className="text-2xl font-bold text-gray-800">{rewards.points || 0}</p>
+              <p className="text-2xl font-bold text-gray-800">{unreadNotifications.length}</p>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
-              <h3 className="text-xl font-bold text-[#2A1B7A]">Quick Actions</h3>
-              <div className="grid grid-cols-2 gap-4">
-                <button onClick={() => setIsCreating(true)} className="p-4 bg-[#F28C3A]/10 rounded-2xl flex flex-col items-center text-center gap-2 hover:bg-[#F28C3A]/20 transition-colors">
-                  <Package className="h-8 w-8 text-[#F28C3A]" />
-                  <span className="font-medium text-[#2A1B7A]">Send Parcel</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('history')}
-                  className="p-4 bg-[#2A1B7A]/10 rounded-2xl flex flex-col items-center text-center gap-2 hover:bg-[#2A1B7A]/20 transition-colors"
-                >
-                  <Store className="h-8 w-8 text-[#2A1B7A]" />
-                  <span className="font-medium text-[#2A1B7A]">Order History</span>
-                </button>
-              </div>
-            </div>
-
+          <div className="grid grid-cols-1 gap-6">
             <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
               <h3 className="text-xl font-bold text-[#2A1B7A]">Default Address</h3>
               {defaultAddress ? (
@@ -236,11 +220,12 @@ export default function CustomerDashboard() {
             </div>
           </div>
 
-          <div className="space-y-4">
+          {hasOrderHistory && (
+            <div className="space-y-4">
             <div className="flex justify-between items-center">
               <h3 className="text-xl font-bold text-[#2A1B7A]">Recent Orders</h3>
-              <button onClick={() => setActiveTab('history')} className="text-[#F28C3A] font-medium flex items-center hover:underline">
-                View All <ChevronRight className="h-4 w-4" />
+              <button onClick={() => setActiveTab('history')} className="text-[#F28C3A] font-medium hover:underline">
+                View All
               </button>
             </div>
             {loading ? (
@@ -270,11 +255,12 @@ export default function CustomerDashboard() {
                 ))}
               </div>
             )}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
-      {activeTab === 'history' && (
+      {activeTab === 'history' && hasOrderHistory && (
         <div className="space-y-4">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <h2 className="text-xl font-bold text-[#2A1B7A]">Order History</h2>
@@ -336,70 +322,6 @@ export default function CustomerDashboard() {
               ))}
             </div>
           )}
-        </div>
-      )}
-
-      {activeTab === 'wallet' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
-            <h3 className="text-xl font-bold text-[#2A1B7A] flex items-center gap-2">
-              <Wallet className="h-6 w-6 text-[#F28C3A]" /> Digital Wallet
-            </h3>
-            <p className="text-3xl font-bold text-gray-900">{formatCurrency(wallet.balance || 0)}</p>
-            <div className="space-y-3">
-              {walletTx.slice(0, 4).map((tx) => (
-                <div key={tx.id} className="flex justify-between text-sm text-gray-600">
-                  <span>{tx.type === 'credit' ? 'Wallet Top Up' : 'Payment'}</span>
-                  <span className={tx.type === 'credit' ? 'text-green-600' : 'text-red-500'}>
-                    {tx.type === 'credit' ? '+' : '-'}{formatCurrency(tx.amount)}
-                  </span>
-                </div>
-              ))}
-              {walletTx.length === 0 && <p className="text-sm text-gray-400">No transactions yet.</p>}
-            </div>
-          </div>
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
-            <h3 className="text-xl font-bold text-[#2A1B7A]">Quick Wallet Actions</h3>
-            <div className="flex items-center gap-3">
-              <input
-                value={topupAmount}
-                onChange={(e) => setTopupAmount(e.target.value)}
-                className="h-12 rounded-xl border border-gray-300 px-3 flex-1"
-                placeholder="Amount in ETB"
-              />
-              <Button onClick={handleTopup} className="bg-[#F28C3A] hover:bg-[#F28C3A]/90 rounded-xl h-12 px-6">Top Up</Button>
-            </div>
-            <p className="text-sm text-gray-500">Wallet top-ups are instant and can be used for faster checkout.</p>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'loyalty' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
-            <h3 className="text-xl font-bold text-[#2A1B7A] flex items-center gap-2">
-              <Award className="h-6 w-6 text-[#F28C3A]" /> Zemen Rewards
-            </h3>
-            <p className="text-3xl font-bold text-gray-900">{rewards.points || 0} points</p>
-            <div className="space-y-3">
-              {rewardTx.slice(0, 4).map((tx) => (
-                <div key={tx.id} className="flex justify-between text-sm text-gray-600">
-                  <span>{tx.description || 'Reward activity'}</span>
-                  <span className={tx.type === 'earn' ? 'text-green-600' : 'text-red-500'}>
-                    {tx.type === 'earn' ? '+' : '-'}{tx.points}
-                  </span>
-                </div>
-              ))}
-              {rewardTx.length === 0 && <p className="text-sm text-gray-400">No rewards activity yet.</p>}
-            </div>
-          </div>
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
-            <h3 className="text-xl font-bold text-[#2A1B7A] flex items-center gap-2">
-              <Gift className="w-5 h-5 text-[#F28C3A]" /> Redeem Rewards
-            </h3>
-            <p className="text-sm text-gray-500">Redeem points for wallet credits and delivery discounts.</p>
-            <Button className="bg-[#2A1B7A] hover:bg-[#2A1B7A]/90 rounded-xl h-12">Redeem Points</Button>
-          </div>
         </div>
       )}
 

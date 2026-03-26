@@ -1,6 +1,7 @@
 import { Outlet, Link, useNavigate, useLocation } from 'react-router-dom';
 import { Package, LogOut, User, Menu, X, Facebook, Twitter, Instagram } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import NotificationBell from './NotificationBell';
 
 const CONTACT = {
   phone: '+251 911 000 000',
@@ -17,6 +18,7 @@ export default function Layout() {
   const [activeSection, setActiveSection] = useState('home');
   const userStr = localStorage.getItem('user');
   const user = userStr ? JSON.parse(userStr) : null;
+  const showNotifications = ['customer', 'driver', 'dispatcher'].includes(user?.role || '');
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -89,77 +91,79 @@ export default function Layout() {
             <span className="font-bold text-xl text-[#2A1B7A]">Zemen Express</span>
           </Link>
 
-          {/* Desktop Nav */}
-          <div className="hidden md:flex items-center gap-5">
-            <button
-              type="button"
-              onClick={() => handleSectionNav('home')}
-              className={navItemClass('home')}
-              aria-current={activeSection === 'home' ? 'page' : undefined}
-            >
-              Home
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSectionNav('services')}
-              className={navItemClass('services')}
-              aria-current={activeSection === 'services' ? 'page' : undefined}
-            >
-              Services
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSectionNav('track')}
-              className={navItemClass('track')}
-              aria-current={activeSection === 'track' ? 'page' : undefined}
-            >
-              Track
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSectionNav('pricing')}
-              className={navItemClass('pricing')}
-              aria-current={activeSection === 'pricing' ? 'page' : undefined}
-            >
-              Pricing
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSectionNav('contact')}
-              className={navItemClass('contact')}
-              aria-current={activeSection === 'contact' ? 'page' : undefined}
-            >
-              Contact
-            </button>
-            {user ? (
-              <>
-                <Link to={dashboardPath(user.role)} className="text-sm font-semibold text-slate-600 hover:text-[#F28C3A] transition-colors">
-                  Dashboard
-                </Link>
-                <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">
-                  <User className="h-4 w-4" />
-                  <span>{user.name} ({user.role})</span>
-                </div>
-                <button onClick={handleLogout} className="text-slate-500 hover:text-red-600 p-2">
-                  <LogOut className="h-5 w-5" />
-                </button>
-              </>
-            ) : (
-              <>
-                <Link to="/login" className="btn-secondary px-4 py-2 text-sm">
-                  Login
-                </Link>
-                <Link to="/register" className="btn-primary px-4 py-2 text-sm">
-                  Register
-                </Link>
-              </>
-            )}
-          </div>
+          <div className="flex items-center gap-3">
+            {showNotifications ? <NotificationBell /> : null}
 
-          {/* Mobile Menu Toggle */}
-          <button className="md:hidden p-2 text-gray-600" onClick={() => setIsMenuOpen(!isMenuOpen)}>
-            {isMenuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
-          </button>
+            <div className="hidden md:flex items-center gap-5">
+              <button
+                type="button"
+                onClick={() => handleSectionNav('home')}
+                className={navItemClass('home')}
+                aria-current={activeSection === 'home' ? 'page' : undefined}
+              >
+                Home
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSectionNav('services')}
+                className={navItemClass('services')}
+                aria-current={activeSection === 'services' ? 'page' : undefined}
+              >
+                Services
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSectionNav('track')}
+                className={navItemClass('track')}
+                aria-current={activeSection === 'track' ? 'page' : undefined}
+              >
+                Track
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSectionNav('pricing')}
+                className={navItemClass('pricing')}
+                aria-current={activeSection === 'pricing' ? 'page' : undefined}
+              >
+                Pricing
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSectionNav('contact')}
+                className={navItemClass('contact')}
+                aria-current={activeSection === 'contact' ? 'page' : undefined}
+              >
+                Contact
+              </button>
+              {user ? (
+                <>
+                  <Link to={dashboardPath(user.role)} className="text-sm font-semibold text-slate-600 hover:text-[#F28C3A] transition-colors">
+                    Dashboard
+                  </Link>
+                  <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">
+                    <User className="h-4 w-4" />
+                    <span>{user.name} ({user.role})</span>
+                  </div>
+                  <button onClick={handleLogout} className="text-slate-500 hover:text-red-600 p-2">
+                    <LogOut className="h-5 w-5" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <Link to="/login" className="btn-secondary px-4 py-2 text-sm">
+                    Login
+                  </Link>
+                  <Link to="/register" className="btn-primary px-4 py-2 text-sm">
+                    Register
+                  </Link>
+                </>
+              )}
+            </div>
+
+            <button className="md:hidden p-2 text-gray-600" onClick={() => setIsMenuOpen(!isMenuOpen)}>
+              {isMenuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
+            </button>
+          </div>
         </div>
 
         {/* Mobile Nav */}

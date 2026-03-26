@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from 'react';
-import { Package, MapPin, Weight, DollarSign, Clock, ShieldCheck, Tag, Info, User, Phone } from 'lucide-react';
+import { Package, MapPin, Weight, DollarSign, Clock, Tag, Info, User, Phone } from 'lucide-react';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
+import { getAddisLocationSuggestions, normalizeLocationInput } from '../lib/addisLocations';
 
 interface ParcelCalculatorProps {
   onConfirm: (data: any) => void;
@@ -28,13 +29,14 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
   const [serviceType, setServiceType] = useState<'express' | 'same_day' | 'next_day' | 'scheduled'>('same_day');
   const [scheduledTime, setScheduledTime] = useState('');
   const [notes, setNotes] = useState('');
-  const [hasInsurance, setHasInsurance] = useState(false);
   const [promoCode, setPromoCode] = useState('');
   const [discount, setDiscount] = useState(0);
   const [error, setError] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'wallet' | 'card'>('cash');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'chapa'>('cash');
 
-  const distance = pickup && dropoff ? 9.5 : 0; // km (demo)
+  const distance = pickup.trim() && dropoff.trim() ? 9.5 : 0; // km (demo)
+  const pickupSuggestions = useMemo(() => getAddisLocationSuggestions(pickup), [pickup]);
+  const dropoffSuggestions = useMemo(() => getAddisLocationSuggestions(dropoff), [dropoff]);
 
   const pricing = useMemo(() => {
     const baseFare = 80;
@@ -43,9 +45,8 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
     const weightSurcharge = weightVal * 6;
     const sizeMultipliers = { small: 1, medium: 1.4, large: 1.9, xlarge: 2.5 };
     const sizeMultiplier = sizeMultipliers[size];
-    const insuranceFee = hasInsurance ? (baseFare + distanceFare) * 0.05 : 0;
     const expressFee = SERVICE_TYPES.find((s) => s.id === serviceType)?.fee ?? 0;
-    const subtotal = (baseFare + distanceFare + weightSurcharge) * sizeMultiplier + insuranceFee + expressFee;
+    const subtotal = (baseFare + distanceFare + weightSurcharge) * sizeMultiplier + expressFee;
     const totalBeforeDiscount = Math.max(0, subtotal - discount);
     const vat = totalBeforeDiscount * 0.15;
     const total = totalBeforeDiscount + vat;
@@ -55,19 +56,24 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
       distanceFare,
       weightSurcharge,
       sizeMultiplier,
-      insuranceFee,
       expressFee,
       discount,
       vat,
       total,
     };
-  }, [distance, weight, size, hasInsurance, discount, serviceType]);
+  }, [distance, weight, size, discount, serviceType]);
 
   const handleApplyPromo = () => {
-    if (promoCode.toUpperCase() === 'ZEMEN20') {
+    const normalizedPromoCode = promoCode.trim().toUpperCase();
+    if (!normalizedPromoCode) {
+      setDiscount(0);
+      setError('');
+      return;
+    }
+    if (normalizedPromoCode === 'ZEMEN20') {
       setDiscount(60);
       setError('');
-    } else if (promoCode.toUpperCase() === 'ZEMEN10') {
+    } else if (normalizedPromoCode === 'ZEMEN10') {
       setDiscount(35);
       setError('');
     } else {
@@ -91,7 +97,10 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pickup || !dropoff || !pickupContactName || !dropoffContactName) {
+    const cleanedPickup = pickup.trim();
+    const cleanedDropoff = dropoff.trim();
+    const cleanedPromoCode = promoCode.trim().toUpperCase();
+    if (!cleanedPickup || !cleanedDropoff || !pickupContactName || !dropoffContactName) {
       setError('Please complete pickup and drop-off details.');
       return;
     }
@@ -101,8 +110,8 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
     }
     setError('');
     onConfirm({
-      pickup,
-      dropoff,
+      pickup: cleanedPickup,
+      dropoff: cleanedDropoff,
       pickupContactName,
       pickupContactPhone,
       dropoffContactName,
@@ -113,8 +122,7 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
       serviceType,
       scheduledTime,
       notes,
-      hasInsurance,
-      promoCode,
+      promoCode: cleanedPromoCode || undefined,
       pricing,
       paymentMethod,
     });
@@ -140,13 +148,35 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
                   <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
                     <MapPin className="h-4 w-4 text-gray-400" /> Pickup Location
                   </label>
-                  <Input required value={pickup} onChange={(e) => setPickup(e.target.value)} placeholder="Enter pickup address" />
+                  <Input
+                    required
+                    list="pickup-location-options"
+                    value={pickup}
+                    onChange={(e) => setPickup(normalizeLocationInput(e.target.value))}
+                    placeholder="Start typing Addis locations like Bole"
+                  />
+                  <datalist id="pickup-location-options">
+                    {pickupSuggestions.map((location) => (
+                      <option key={location} value={location} />
+                    ))}
+                  </datalist>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
                     <MapPin className="h-4 w-4 text-gray-400" /> Drop-off Location
                   </label>
-                  <Input required value={dropoff} onChange={(e) => setDropoff(e.target.value)} placeholder="Enter drop-off address" />
+                  <Input
+                    required
+                    list="dropoff-location-options"
+                    value={dropoff}
+                    onChange={(e) => setDropoff(normalizeLocationInput(e.target.value))}
+                    placeholder="Type an Addis destination"
+                  />
+                  <datalist id="dropoff-location-options">
+                    {dropoffSuggestions.map((location) => (
+                      <option key={location} value={location} />
+                    ))}
+                  </datalist>
                 </div>
               </div>
 
@@ -256,21 +286,6 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
                 />
               </div>
 
-              <div className="flex items-center gap-3 p-4 bg-gray-50 rounded-xl border border-gray-100">
-                <input
-                  type="checkbox"
-                  id="insurance"
-                  className="w-5 h-5 rounded text-[#F28C3A] focus:ring-[#F28C3A]"
-                  checked={hasInsurance}
-                  onChange={(e) => setHasInsurance(e.target.checked)}
-                />
-                <label htmlFor="insurance" className="flex-1 flex items-center justify-between cursor-pointer">
-                  <span className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                    <ShieldCheck className="h-4 w-4 text-[#F28C3A]" /> Add Package Insurance
-                  </span>
-                  <span className="text-xs text-gray-500">5% of subtotal</span>
-                </label>
-              </div>
             </div>
           )}
 
@@ -283,7 +298,7 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
               </div>
 
               <div className="flex items-center gap-3">
-                <Input value={promoCode} onChange={(e) => setPromoCode(e.target.value)} placeholder="Promo code" />
+                <Input value={promoCode} onChange={(e) => setPromoCode(e.target.value.trimStart())} placeholder="Promo code" />
                 <Button type="button" variant="outline" onClick={handleApplyPromo}>
                   <Tag className="h-4 w-4" /> Apply
                 </Button>
@@ -294,8 +309,8 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
 
               <div className="space-y-2">
                 <label className="text-sm font-medium text-gray-700">Payment Method</label>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {['cash', 'wallet', 'card'].map((method) => (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {['cash', 'chapa'].map((method) => (
                     <button
                       key={method}
                       type="button"
@@ -306,7 +321,6 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
                     </button>
                   ))}
                 </div>
-                <p className="text-xs text-gray-400">Card payments are enabled in demo mode.</p>
               </div>
             </div>
           )}
@@ -327,53 +341,49 @@ export default function ParcelCalculator({ onConfirm }: ParcelCalculatorProps) {
           </div>
         </div>
 
-        <div className="bg-gray-50 p-6 rounded-2xl border border-gray-100 h-fit space-y-6">
-          <h3 className="font-bold text-lg text-[#2A1B7A]">Price Breakdown</h3>
-          <div className="space-y-3 text-sm">
-            <div className="flex justify-between text-gray-600">
-              <span>Base Fare</span>
-              <span>{pricing.baseFare.toFixed(2)} ETB</span>
-            </div>
-            {distance > 0 && (
+        {step >= 2 && (
+          <div className="bg-gray-50 p-6 rounded-2xl border border-gray-100 h-fit space-y-6">
+            <h3 className="font-bold text-lg text-[#2A1B7A]">Price Breakdown</h3>
+            <div className="space-y-3 text-sm">
               <div className="flex justify-between text-gray-600">
-                <span>Distance ({distance} km)</span>
-                <span>{pricing.distanceFare.toFixed(2)} ETB</span>
+                <span>Base Fare</span>
+                <span>{pricing.baseFare.toFixed(2)} ETB</span>
               </div>
-            )}
-            <div className="flex justify-between text-gray-600">
-              <span>Weight Surcharge</span>
-              <span>{pricing.weightSurcharge.toFixed(2)} ETB</span>
-            </div>
-            <div className="flex justify-between text-gray-600">
-              <span>Size Multiplier</span>
-              <span>x{pricing.sizeMultiplier}</span>
-            </div>
-            <div className="flex justify-between text-gray-600">
-              <span>Service Fee</span>
-              <span>{pricing.expressFee.toFixed(2)} ETB</span>
-            </div>
-            {hasInsurance && (
+              {distance > 0 && (
+                <div className="flex justify-between text-gray-600">
+                  <span>Distance ({distance} km)</span>
+                  <span>{pricing.distanceFare.toFixed(2)} ETB</span>
+                </div>
+              )}
               <div className="flex justify-between text-gray-600">
-                <span>Insurance</span>
-                <span>{pricing.insuranceFee.toFixed(2)} ETB</span>
+                <span>Weight Surcharge</span>
+                <span>{pricing.weightSurcharge.toFixed(2)} ETB</span>
               </div>
-            )}
-            {pricing.discount > 0 && (
-              <div className="flex justify-between text-green-600">
-                <span>Promo Discount</span>
-                <span>-{pricing.discount.toFixed(2)} ETB</span>
+              <div className="flex justify-between text-gray-600">
+                <span>Size Multiplier</span>
+                <span>x{pricing.sizeMultiplier}</span>
               </div>
-            )}
-            <div className="flex justify-between text-gray-600">
-              <span>VAT (15%)</span>
-              <span>{pricing.vat.toFixed(2)} ETB</span>
+              <div className="flex justify-between text-gray-600">
+                <span>Service Fee</span>
+                <span>{pricing.expressFee.toFixed(2)} ETB</span>
+              </div>
+              {pricing.discount > 0 && (
+                <div className="flex justify-between text-green-600">
+                  <span>Promo Discount</span>
+                  <span>-{pricing.discount.toFixed(2)} ETB</span>
+                </div>
+              )}
+              <div className="flex justify-between text-gray-600">
+                <span>VAT (15%)</span>
+                <span>{pricing.vat.toFixed(2)} ETB</span>
+              </div>
+            </div>
+            <div className="border-t border-gray-200 pt-4 flex items-center justify-between">
+              <span className="font-bold text-[#2A1B7A]">Total</span>
+              <span className="text-xl font-bold text-[#F28C3A]">{pricing.total.toFixed(2)} ETB</span>
             </div>
           </div>
-          <div className="border-t border-gray-200 pt-4 flex items-center justify-between">
-            <span className="font-bold text-[#2A1B7A]">Total</span>
-            <span className="text-xl font-bold text-[#F28C3A]">{pricing.total.toFixed(2)} ETB</span>
-          </div>
-        </div>
+        )}
       </form>
     </div>
   );

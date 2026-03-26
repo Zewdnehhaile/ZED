@@ -9,6 +9,8 @@ const UserSchema = new mongoose.Schema(
     role: { type: String, required: true, index: true },
     phone: { type: String },
     is_active: { type: Boolean, default: true },
+    password_updated_at: { type: Date, default: Date.now },
+    last_login_at: { type: Date, default: null },
     created_at: { type: Date, default: Date.now },
     updated_at: { type: Date, default: Date.now },
   },
@@ -274,6 +276,19 @@ const NotificationPreferenceSchema = new mongoose.Schema(
   { collection: 'notification_preferences' }
 );
 
+const PasswordResetSchema = new mongoose.Schema(
+  {
+    user_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+    email: { type: String, required: true, index: true },
+    otp_hash: { type: String, required: true },
+    expires_at: { type: Date, required: true, index: true },
+    consumed_at: { type: Date, default: null },
+    attempts: { type: Number, default: 0 },
+    created_at: { type: Date, default: Date.now },
+  },
+  { collection: 'password_resets' }
+);
+
 // Ops + pricing
 const ZoneSchema = new mongoose.Schema(
   {
@@ -336,6 +351,12 @@ const AuditLogSchema = new mongoose.Schema(
     entity_type: String,
     entity_id: String,
     note: String,
+    ip: String,
+    user_agent: String,
+    review_status: { type: String, default: 'unreviewed' },
+    review_note: String,
+    reviewed_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    reviewed_at: Date,
     created_at: { type: Date, default: Date.now },
   },
   { collection: 'audit_logs' }
@@ -374,6 +395,7 @@ export const Rating = mongoose.models.Rating || mongoose.model('Rating', RatingS
 export const Notification = mongoose.models.Notification || mongoose.model('Notification', NotificationSchema);
 export const NotificationPreference =
   mongoose.models.NotificationPreference || mongoose.model('NotificationPreference', NotificationPreferenceSchema);
+export const PasswordReset = mongoose.models.PasswordReset || mongoose.model('PasswordReset', PasswordResetSchema);
 
 export const Zone = mongoose.models.Zone || mongoose.model('Zone', ZoneSchema);
 export const PricingRule = mongoose.models.PricingRule || mongoose.model('PricingRule', PricingRuleSchema);

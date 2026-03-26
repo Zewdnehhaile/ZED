@@ -103,6 +103,10 @@ export default function OrderDetails() {
 
   const submitIssue = async () => {
     if (!order) return;
+    if (order.status === 'completed') {
+      toast.push({ title: 'Completed deliveries cannot be reported here', variant: 'info' });
+      return;
+    }
     try {
       await apiFetch(`/api/orders/${order.id}/issue`, {
         method: 'POST',
@@ -344,7 +348,7 @@ export default function OrderDetails() {
             </div>
           )}
 
-          {!isStaff && (
+          {!isStaff && order.status !== 'completed' && (
             <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
               <h3 className="font-semibold text-[#2A1B7A] flex items-center gap-2"><AlertTriangle className="h-5 w-5" /> Issue with delivery</h3>
               <select

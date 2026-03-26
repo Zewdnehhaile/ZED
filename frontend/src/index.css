@@ -19,6 +19,19 @@
 @layer base {
   html {
     scroll-behavior: smooth;
+    font-size: 17px;
+  }
+
+  body {
+    @apply text-slate-700 antialiased;
+    line-height: 1.55;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
   }
 
   @media (prefers-reduced-motion: reduce) {

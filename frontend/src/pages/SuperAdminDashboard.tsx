@@ -13,7 +13,7 @@ type CreateAdminForm = {
   role: 'admin' | 'manager' | 'dispatcher';
 };
 
-type TabType = 'overview' | 'orders' | 'drivers' | 'reports' | 'operations' | 'map';
+type TabType = 'overview' | 'orders' | 'drivers' | 'reports' | 'operations' | 'fraud';
 
 export default function SuperAdminDashboard() {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
@@ -24,6 +24,10 @@ export default function SuperAdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [updatingUser, setUpdatingUser] = useState<string | null>(null);
+  const [selectedUser, setSelectedUser] = useState<any | null>(null);
+  const [loadingSelectedUser, setLoadingSelectedUser] = useState(false);
+  const [resetPassword, setResetPassword] = useState('');
+  const [reviewingAudit, setReviewingAudit] = useState<string | null>(null);
   const [createForm, setCreateForm] = useState<CreateAdminForm>({
     name: '',
     email: '',
@@ -31,6 +35,7 @@ export default function SuperAdminDashboard() {
     role: 'admin',
   });
   const toast = useToast();
+  const currentUser = JSON.parse(localStorage.getItem('user') || '{}');
 
   const ACTIVE_BADGES: Record<string, string> = {
     active: 'bg-green-100 text-green-700',
@@ -82,6 +87,26 @@ export default function SuperAdminDashboard() {
     fetchData();
   }, []);
 
+  const openUserDetails = async (user: any) => {
+    setResetPassword('');
+    setSelectedUser(user);
+    setLoadingSelectedUser(true);
+    try {
+      const detailedUser = await apiFetch(`/api/admin/users/${user.id}`);
+      setSelectedUser(detailedUser);
+    } catch (error: any) {
+      toast.push({ title: 'Unable to load user details', description: error.error || '', variant: 'error' });
+    } finally {
+      setLoadingSelectedUser(false);
+    }
+  };
+
+  const closeUserDetails = () => {
+    setResetPassword('');
+    setSelectedUser(null);
+    setLoadingSelectedUser(false);
+  };
+
   const totals = useMemo(() => {
     const byRole = users.reduce((acc: Record<string, number>, user) => {
       acc[user.role] = (acc[user.role] || 0) + 1;
@@ -129,6 +154,39 @@ export default function SuperAdminDashboard() {
 
   if (loading) return <div className="text-center py-12 text-gray-500">Loading super admin dashboard...</div>;
 
+  const handleResetPassword = async () => {
+    if (!selectedUser) return;
+    try {
+      await apiFetch(`/api/admin/users/${selectedUser.id}/password`, {
+        method: 'PUT',
+        body: JSON.stringify({ password: resetPassword }),
+      });
+      const refreshedUser = await apiFetch(`/api/admin/users/${selectedUser.id}`);
+      setSelectedUser(refreshedUser);
+      toast.push({ title: 'Password reset', variant: 'success' });
+      setResetPassword('');
+      fetchData();
+    } catch (error: any) {
+      toast.push({ title: 'Unable to reset password', description: error.error || '', variant: 'error' });
+    }
+  };
+
+  const reviewAudit = async (id: string, status: string) => {
+    setReviewingAudit(id);
+    try {
+      await apiFetch(`/api/admin/audit/${id}/review`, {
+        method: 'PUT',
+        body: JSON.stringify({ status }),
+      });
+      toast.push({ title: 'Audit reviewed', variant: 'success' });
+      fetchData();
+    } catch (error: any) {
+      toast.push({ title: 'Unable to update audit', description: error.error || '', variant: 'error' });
+    } finally {
+      setReviewingAudit(null);
+    }
+  };
+
   return (
     <div className="space-y-8">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -139,7 +197,7 @@ export default function SuperAdminDashboard() {
       </div>
 
       <div className="flex gap-4 border-b border-gray-200 overflow-x-auto pb-2">
-        {['overview', 'orders', 'drivers', 'reports', 'operations', 'map'].map((tab) => (
+        {['overview', 'orders', 'drivers', 'reports', 'operations', 'fraud'].map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab as TabType)}
@@ -329,14 +387,23 @@ export default function SuperAdminDashboard() {
                         </span>
                       </td>
                       <td className="p-3">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={user.role === 'super_admin' || updatingUser === user.id}
-                          onClick={() => toggleUserActive(user.id, user.is_active === false)}
-                        >
-                          {user.is_active === false ? 'Activate' : 'Deactivate'}
-                        </Button>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => openUserDetails(user)}
+                          >
+                            View
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={updatingUser === user.id || user.id === currentUser?.id}
+                            onClick={() => toggleUserActive(user.id, user.is_active === false)}
+                          >
+                            {user.is_active === false ? 'Activate' : 'Deactivate'}
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -349,22 +416,116 @@ export default function SuperAdminDashboard() {
               </tbody>
             </table>
           </div>
+
         </div>
       )}
 
-      {activeTab === 'map' && (
+      {activeTab === 'fraud' && (
         <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 space-y-4">
-          <h2 className="text-xl font-bold text-[#2A1B7A] flex items-center gap-2">
-            <AlertTriangle className="h-5 w-5 text-[#F28C3A]" /> Audit & Fraud Watch
-          </h2>
-          <div className="space-y-2 text-sm text-gray-600">
-            {auditLogs.map((log) => (
-              <div key={log.id} className="flex justify-between border-b border-gray-100 pb-2">
-                <span>{log.action} • {log.entity_type} #{log.entity_id} • {log.actor_role || 'system'}</span>
-                <span className="text-xs text-gray-400">{formatShortDate(log.created_at)}</span>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-bold text-[#2A1B7A] flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-[#F28C3A]" /> Fraud & Audit Watch
+            </h2>
+            <span className="text-xs text-gray-500">Track critical actions and IPs</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-sm">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 uppercase tracking-wider text-xs">
+                  <th className="p-3 font-medium">Action</th>
+                  <th className="p-3 font-medium">Actor</th>
+                  <th className="p-3 font-medium">Entity</th>
+                  <th className="p-3 font-medium">IP</th>
+                  <th className="p-3 font-medium">Status</th>
+                  <th className="p-3 font-medium">Review</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {auditLogs.map((log) => (
+                  <tr key={log.id} className="hover:bg-gray-50/50">
+                    <td className="p-3 font-medium text-gray-800">{log.action}</td>
+                    <td className="p-3 text-gray-600">
+                      {log.actor_role || 'system'}
+                      {log.actor_id ? ` • ${log.actor_id}` : ''}
+                    </td>
+                    <td className="p-3 text-gray-600">{log.entity_type || '—'} {log.entity_id ? `#${log.entity_id}` : ''}</td>
+                    <td className="p-3 text-gray-600">{log.ip || '—'}</td>
+                    <td className="p-3">
+                      <span className={`px-2 py-1 rounded-full text-xs font-semibold uppercase ${log.review_status === 'reviewed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                        {log.review_status || 'unreviewed'}
+                      </span>
+                    </td>
+                    <td className="p-3">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={reviewingAudit === log.id}
+                        onClick={() => reviewAudit(log.id, log.review_status === 'reviewed' ? 'unreviewed' : 'reviewed')}
+                      >
+                        {log.review_status === 'reviewed' ? 'Unreview' : 'Mark Reviewed'}
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {auditLogs.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="p-6 text-center text-gray-500">No audit entries yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {selectedUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6 backdrop-blur-sm"
+          onClick={closeUserDetails}
+        >
+          <div
+            className="w-full max-w-3xl rounded-[28px] bg-white shadow-2xl border border-white/60 max-h-[90vh] overflow-y-auto"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="sticky top-0 flex items-start justify-between gap-4 border-b border-gray-100 bg-white/95 px-6 py-5 backdrop-blur">
+              <div>
+                <h3 className="text-xl font-bold text-[#2A1B7A]">User Details</h3>
+                <p className="text-sm text-gray-500">Review account information and manage password access.</p>
               </div>
-            ))}
-            {auditLogs.length === 0 && <p className="text-sm text-gray-400">No audit entries yet.</p>}
+              <Button size="sm" variant="outline" onClick={closeUserDetails}>Close</Button>
+            </div>
+
+            <div className="space-y-6 px-6 py-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-700">
+                <div><span className="text-gray-500">Name:</span> {selectedUser.name}</div>
+                <div><span className="text-gray-500">Email:</span> {selectedUser.email}</div>
+                <div><span className="text-gray-500">Role:</span> {selectedUser.role}</div>
+                <div><span className="text-gray-500">Status:</span> {selectedUser.is_active === false ? 'inactive' : 'active'}</div>
+                <div><span className="text-gray-500">Phone:</span> {selectedUser.phone || '—'}</div>
+                <div><span className="text-gray-500">Created:</span> {formatShortDate(selectedUser.created_at)}</div>
+                <div><span className="text-gray-500">Last Updated:</span> {formatShortDate(selectedUser.updated_at)}</div>
+                <div><span className="text-gray-500">Password Updated:</span> {selectedUser.password_updated_at ? formatShortDate(selectedUser.password_updated_at) : '—'}</div>
+                <div><span className="text-gray-500">Last Login:</span> {selectedUser.last_login_at ? formatShortDate(selectedUser.last_login_at) : '—'}</div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700">
+                <div className="font-semibold text-[#2A1B7A]">Stored password hash</div>
+                <div className="mt-2 rounded-xl border border-slate-200 bg-white px-3 py-3 font-mono text-xs text-slate-600 break-all">
+                  {loadingSelectedUser ? 'Loading password hash...' : selectedUser.password_hash || 'No stored hash available.'}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <PasswordInput
+                  placeholder="Set new password"
+                  value={resetPassword}
+                  onChange={(e) => setResetPassword(e.target.value)}
+                />
+                <Button onClick={handleResetPassword} className="bg-[#2A1B7A] hover:bg-[#2A1B7A]/90" disabled={loadingSelectedUser || !resetPassword.trim()}>
+                  Reset Password
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       )}

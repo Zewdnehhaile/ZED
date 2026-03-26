@@ -8,6 +8,7 @@ import { Server } from 'socket.io';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import { connectMongo } from './lib/mongo.js';
 import {
   User,
@@ -33,6 +34,7 @@ import {
   AuditLog,
   DriverBlacklist,
   Product,
+  PasswordReset,
 } from './models/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -70,9 +72,81 @@ const STATUS_TRANSITIONS: Record<string, string[]> = {
 };
 
 const VALID_SERVICE_TYPES = ['express', 'same_day', 'next_day', 'scheduled'];
+const VALID_ORDER_PAYMENT_METHODS = ['cash', 'chapa'] as const;
+const PASSWORD_RESET_OTP_TTL_MINUTES = Number(process.env.PASSWORD_RESET_OTP_TTL_MINUTES || 10);
+const PASSWORD_RESET_EMAIL_FROM = process.env.PASSWORD_RESET_EMAIL_FROM || process.env.SMTP_USER || 'no-reply@zemen.local';
+const PASSWORD_RESET_APP_URL = process.env.APP_URL || 'http://localhost:3000';
 
 const validateEmail = (email: string) => /\S+@\S+\.\S+/.test(email);
 const validatePhone = (phone: string) => /^\+?\d[\d\s-]{7,}$/.test(phone);
+const normalizeAddressText = (value: string) => String(value || '').replace(/\s+/g, ' ').trim();
+const normalizePromoCode = (value: string) => String(value || '').trim().toUpperCase();
+const maskEmail = (email: string) => {
+  const [localPart = '', domain = ''] = String(email || '').split('@');
+  if (!localPart || !domain) return email;
+  if (localPart.length <= 2) return `${localPart[0] || '*'}***@${domain}`;
+  return `${localPart.slice(0, 2)}***@${domain}`;
+};
+const generateNumericOtp = (length = 6) =>
+  Array.from({ length })
+    .map(() => Math.floor(Math.random() * 10).toString())
+    .join('');
+const hashOtp = (email: string, otp: string) =>
+  crypto.createHash('sha256').update(`${String(email).toLowerCase().trim()}:${otp}`).digest('hex');
+const dedupeNotifications = (items: any[]) => {
+  const seen = new Set<string>();
+  const deduped: any[] = [];
+  for (const raw of items || []) {
+    const signature = `${raw?.type || ''}|${raw?.title || ''}|${raw?.body || ''}|${new Date(raw?.created_at || 0).toISOString().slice(0, 16)}`;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    deduped.push(raw);
+  }
+  return deduped;
+};
+const sendPasswordResetOtpEmail = async (toEmail: string, otp: string) => {
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpPort = Number(process.env.SMTP_PORT || 587);
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPass = process.env.SMTP_PASS;
+
+  const text = [
+    'Zemen Express Password Reset',
+    '',
+    `Your OTP code is: ${otp}`,
+    `This code expires in ${PASSWORD_RESET_OTP_TTL_MINUTES} minutes.`,
+    '',
+    `Reset page: ${PASSWORD_RESET_APP_URL}/forgot-password`,
+  ].join('\n');
+
+  if (!smtpHost || !smtpUser || !smtpPass) {
+    console.log(`[password-reset] OTP for ${toEmail}: ${otp}`);
+    return { delivered: false, fallback: true };
+  }
+
+  // Lazy-load so the app can still run without SMTP config during setup.
+  const dynamicImport = new Function('modulePath', 'return import(modulePath)') as (modulePath: string) => Promise<any>;
+  const nodemailerModule = await dynamicImport('nodemailer').catch(() => null);
+  if (!nodemailerModule?.default?.createTransport) {
+    console.log(`[password-reset] nodemailer unavailable. OTP for ${toEmail}: ${otp}`);
+    return { delivered: false, fallback: true };
+  }
+
+  const transporter = nodemailerModule.default.createTransport({
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpPort === 465,
+    auth: { user: smtpUser, pass: smtpPass },
+  });
+
+  await transporter.sendMail({
+    from: PASSWORD_RESET_EMAIL_FROM,
+    to: toEmail,
+    subject: 'Your Zemen Express password reset OTP',
+    text,
+  });
+  return { delivered: true, fallback: false };
+};
 
 const MAX_DISPATCH_ATTEMPTS = 6;
 const MAX_ACTIVE_OFFERS_PER_DRIVER = 2;
@@ -215,17 +289,34 @@ const getPromo = async (code: string, userId: string) => {
   return promo;
 };
 
-const logAudit = (actorId: number | string | null, actorRole: string | null, action: string, entityType?: string, entityId?: number | string, note?: string) => {
-  AuditLog.create({
-    actor_id: actorId || null,
-    actor_role: actorRole || null,
-    action,
-    entity_type: entityType || null,
-    entity_id: entityId ? String(entityId) : null,
-    note: note || null,
-    created_at: new Date(),
-  }).catch(() => undefined);
-};
+  const logAudit = (
+    actorId: number | string | null,
+    actorRole: string | null,
+    action: string,
+    entityType?: string,
+    entityId?: number | string,
+    note?: string,
+    meta?: { ip?: string | null; user_agent?: string | null }
+  ) => {
+    AuditLog.create({
+      actor_id: actorId || null,
+      actor_role: actorRole || null,
+      action,
+      entity_type: entityType || null,
+      entity_id: entityId ? String(entityId) : null,
+      note: note || null,
+      ip: meta?.ip || null,
+      user_agent: meta?.user_agent || null,
+      created_at: new Date(),
+    }).catch(() => undefined);
+  };
+
+  const getAuditMeta = (req: any) => {
+    const forwarded = (req.headers['x-forwarded-for'] || '') as string;
+    const ip = forwarded.split(',')[0]?.trim() || req.socket?.remoteAddress || null;
+    const user_agent = (req.headers['user-agent'] || '').toString() || null;
+    return { ip, user_agent };
+  };
 
 
 async function startServer() {
@@ -431,7 +522,16 @@ async function startServer() {
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
-      const user = await User.create({ name, email, password: hashedPassword, role, phone: phone || '', created_at: new Date(), updated_at: new Date() });
+      const user = await User.create({
+        name,
+        email,
+        password: hashedPassword,
+        role,
+        phone: phone || '',
+        password_updated_at: new Date(),
+        created_at: new Date(),
+        updated_at: new Date(),
+      });
 
       await Wallet.create({ user_id: user._id, balance: 0, created_at: new Date(), updated_at: new Date() });
       await Reward.create({ user_id: user._id, points: 0, created_at: new Date(), updated_at: new Date() });
@@ -465,10 +565,122 @@ async function startServer() {
         return res.status(401).json({ error: 'Invalid email or password' });
       }
 
+      await User.findByIdAndUpdate(user._id, { last_login_at: new Date() });
       const token = jwt.sign({ id: String(user._id), role: user.role }, JWT_SECRET, { expiresIn: '7d' });
       res.json({ token, user: { id: String(user._id), name: user.name, email: user.email, role: user.role } });
     } catch (error) {
       console.error('Login error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.post('/api/auth/forgot-password/request', async (req, res) => {
+    try {
+      const email = String(req.body?.email || '').toLowerCase().trim();
+      if (!validateEmail(email)) {
+        return res.status(400).json({ error: 'Please enter a valid email address.' });
+      }
+      if (isRateLimited(`forgot-password:request:${req.ip}:${email}`, 5, 10 * 60 * 1000)) {
+        return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+      }
+
+      const user = await User.findOne({ email, is_active: { $ne: false } }).lean();
+      if (!user) {
+        return res.json({
+          success: true,
+          message: `If an account exists for ${maskEmail(email)}, an OTP has been sent.`,
+        });
+      }
+
+      await PasswordReset.updateMany(
+        { email, consumed_at: null },
+        { consumed_at: new Date() }
+      );
+
+      const otp = generateNumericOtp(6);
+      const otpHash = hashOtp(email, otp);
+      const expiresAt = new Date(Date.now() + PASSWORD_RESET_OTP_TTL_MINUTES * 60 * 1000);
+
+      await PasswordReset.create({
+        user_id: user._id,
+        email,
+        otp_hash: otpHash,
+        expires_at: expiresAt,
+        consumed_at: null,
+        attempts: 0,
+        created_at: new Date(),
+      });
+
+      await sendPasswordResetOtpEmail(email, otp).catch((error) => {
+        console.error('Password reset email error:', error);
+      });
+
+      const response: Record<string, any> = {
+        success: true,
+        message: `OTP sent to ${maskEmail(email)}.`,
+        expiresInMinutes: PASSWORD_RESET_OTP_TTL_MINUTES,
+      };
+      if (process.env.NODE_ENV !== 'production') {
+        response.devOtp = otp;
+      }
+      res.json(response);
+    } catch (error) {
+      console.error('Forgot password request error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.post('/api/auth/forgot-password/reset', async (req, res) => {
+    try {
+      const email = String(req.body?.email || '').toLowerCase().trim();
+      const otp = String(req.body?.otp || '').trim();
+      const newPassword = String(req.body?.newPassword || '');
+
+      if (!validateEmail(email)) {
+        return res.status(400).json({ error: 'Please enter a valid email address.' });
+      }
+      if (!/^\d{6}$/.test(otp)) {
+        return res.status(400).json({ error: 'OTP must be 6 digits.' });
+      }
+      if (newPassword.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      }
+      if (isRateLimited(`forgot-password:verify:${req.ip}:${email}`, 8, 10 * 60 * 1000)) {
+        return res.status(429).json({ error: 'Too many OTP attempts. Please wait and try again.' });
+      }
+
+      const resetRecord = await PasswordReset.findOne({
+        email,
+        consumed_at: null,
+        expires_at: { $gt: new Date() },
+      })
+        .sort({ created_at: -1 })
+        .lean();
+
+      if (!resetRecord) {
+        return res.status(400).json({ error: 'OTP expired or invalid. Please request a new code.' });
+      }
+
+      const incomingHash = hashOtp(email, otp);
+      if (incomingHash !== resetRecord.otp_hash) {
+        await PasswordReset.findByIdAndUpdate(resetRecord._id, { $inc: { attempts: 1 } });
+        return res.status(400).json({ error: 'Invalid OTP.' });
+      }
+
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      await User.findByIdAndUpdate(resetRecord.user_id, {
+        password: hashedPassword,
+        password_updated_at: new Date(),
+        updated_at: new Date(),
+      });
+
+      await PasswordReset.findByIdAndUpdate(resetRecord._id, {
+        consumed_at: new Date(),
+      });
+
+      res.json({ success: true, message: 'Password updated successfully. Please sign in.' });
+    } catch (error) {
+      console.error('Forgot password reset error:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -545,24 +757,25 @@ async function startServer() {
 
   const createNotification = async (userId: string, type: string, title: string, body?: string) => {
     const prefs = await NotificationPreference.findOne({ user_id: toObjectId(userId) }).lean();
-    const channels = [
-      { key: 'inapp', enabled: prefs?.inapp !== false },
-      { key: 'sms', enabled: prefs?.sms !== false },
-      { key: 'email', enabled: prefs?.email !== false },
-    ];
-    for (const channel of channels) {
-      if (!channel.enabled) return;
-      const notification = await Notification.create({
-        user_id: toObjectId(userId),
-        type,
-        title,
-        body: body || null,
-        channel: channel.key,
-        is_read: false,
-        created_at: new Date(),
-      });
-      io.to(`user_${userId}`).emit('notification', notification.toObject());
-    }
+    if (prefs?.inapp === false) return null;
+
+    const notification = await Notification.create({
+      user_id: toObjectId(userId),
+      type,
+      title,
+      body: body || null,
+      channel: 'inapp',
+      is_read: false,
+      created_at: new Date(),
+    });
+    const normalized = normalizeDoc(notification);
+    io.to(`user_${userId}`).emit('notification', normalized);
+    return normalized;
+  };
+
+  const createRoleNotifications = async (roles: string[], type: string, title: string, body?: string) => {
+    const users = await User.find({ role: { $in: roles }, is_active: { $ne: false } }).select('_id').lean();
+    await Promise.all(users.map((user) => createNotification(String(user._id), type, title, body)));
   };
 
   const recordOrderEvent = async (orderId: string, actorRole: string, actorId: string | null, eventType: string, fromStatus?: string, toStatus?: string, note?: string) => {
@@ -702,6 +915,7 @@ async function startServer() {
       const events = await OrderEvent.find({ order_id: toObjectId(String(order._id)) }).sort({ created_at: 1 }).lean();
 
       let driverLocation = null as null | { lat: number; lng: number; updated_at?: Date | null };
+      let driverProfile = null as null | { name: string; phone: string; vehicle: string };
       if (order?.driver_id) {
         const driverIdRaw = String(order.driver_id);
         if (mongoose.Types.ObjectId.isValid(driverIdRaw)) {
@@ -715,10 +929,19 @@ async function startServer() {
               driverLocation = { lat: driver.last_lat, lng: driver.last_lng, updated_at: driver.last_seen || driver.updated_at || null };
             }
           }
+          const driverUser = await User.findById(driverId).select('name phone').lean();
+          const driverMeta = await Driver.findOne({ user_id: driverId }).select('vehicle_type').lean();
+          if (driverUser) {
+            driverProfile = {
+              name: driverUser.name || 'Assigned Driver',
+              phone: driverUser.phone || '',
+              vehicle: driverMeta?.vehicle_type || 'Vehicle',
+            };
+          }
         }
       }
 
-      res.json({ order: normalizeDoc(order), events: normalizeMany(events), driverLocation });
+      res.json({ order: normalizeDoc(order), events: normalizeMany(events), driverLocation, driverProfile });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
     }
@@ -727,25 +950,28 @@ async function startServer() {
   app.post('/api/orders/quote', authenticateToken, requireRole(['customer']), async (req: any, res: any) => {
     try {
       const { pickup, dropoff, packageSize, packageWeight, serviceType, insurance, promoCode, pickupLat, pickupLng, dropoffLat, dropoffLng } = req.body;
-      if (!pickup || !dropoff) return res.status(400).json({ error: 'Pickup and drop-off required.' });
+      const normalizedPickup = normalizeAddressText(pickup);
+      const normalizedDropoff = normalizeAddressText(dropoff);
+      const normalizedPromoCode = normalizePromoCode(promoCode);
+      if (!normalizedPickup || !normalizedDropoff) return res.status(400).json({ error: 'Pickup and drop-off required.' });
       const zone =
         (await getZoneForCoords(pickupLat, pickupLng)) ||
         (await getZoneForCoords(dropoffLat, dropoffLng)) ||
-        (await inferZoneFromAddress(pickup, dropoff)) ||
+        (await inferZoneFromAddress(normalizedPickup, normalizedDropoff)) ||
         (ALLOW_OUT_OF_ZONE ? await Zone.findOne({ status: 'active' }).sort({ name: 1 }).lean() : null);
       if (!zone || zone.status !== 'active') {
         return res.status(400).json({ error: zone?.message || 'Service is only available in Addis Ababa zones for now.' });
       }
       const distanceKm = pickupLat && dropoffLat ? await getRouteDistanceKm(pickupLat, pickupLng, dropoffLat, dropoffLng) : 6;
       const pricingRule = await getPricingRule(zone.name, serviceType);
-      const promo = await getPromo(promoCode, req.user.id);
+      const promo = await getPromo(normalizedPromoCode, req.user.id);
       const pricing = calculatePricing({
         distanceKm,
         size: packageSize,
         weight: packageWeight,
         serviceType,
         insurance,
-        promoCode,
+        promoCode: normalizedPromoCode,
       }, pricingRule, promo);
       res.json({ pricing, distanceKm, zone: zone.name });
     } catch (error) {
@@ -779,7 +1005,12 @@ async function startServer() {
         codAmount,
       } = req.body;
 
-      if (!pickup || !dropoff || !packageSize || !packageWeight || !serviceType) {
+      const normalizedPickup = normalizeAddressText(pickup);
+      const normalizedDropoff = normalizeAddressText(dropoff);
+      const normalizedPromoCode = normalizePromoCode(promoCode);
+      const normalizedPaymentMethod = String(paymentMethod || 'cash').toLowerCase();
+
+      if (!normalizedPickup || !normalizedDropoff || !packageSize || !packageWeight || !serviceType) {
         return res.status(400).json({ error: 'Missing required fields.' });
       }
       if (pickupContactPhone && !validatePhone(pickupContactPhone)) {
@@ -790,6 +1021,9 @@ async function startServer() {
       }
       if (!VALID_SERVICE_TYPES.includes(serviceType)) {
         return res.status(400).json({ error: 'Invalid service type.' });
+      }
+      if (!VALID_ORDER_PAYMENT_METHODS.includes(normalizedPaymentMethod as (typeof VALID_ORDER_PAYMENT_METHODS)[number])) {
+        return res.status(400).json({ error: 'Invalid payment method. Use cash or chapa.' });
       }
       if (scheduleType === 'scheduled' && !scheduledTime) {
         return res.status(400).json({ error: 'Scheduled time is required.' });
@@ -802,14 +1036,14 @@ async function startServer() {
 
       const distanceKm = pickupLat && dropoffLat ? await getRouteDistanceKm(pickupLat, pickupLng, dropoffLat, dropoffLng) : 6;
       const pricingRule = await getPricingRule(coverage.zone || null, serviceType);
-      const promo = await getPromo(promoCode, req.user.id);
+      const promo = await getPromo(normalizedPromoCode, req.user.id);
       const pricing = calculatePricing({
         distanceKm,
         size: packageSize,
         weight: packageWeight,
         serviceType,
-        insurance,
-        promoCode,
+        insurance: false,
+        promoCode: normalizedPromoCode,
       }, pricingRule, promo);
 
       if (promo) {
@@ -827,10 +1061,10 @@ async function startServer() {
         service_type: serviceType,
         schedule_type: scheduleType || 'now',
         scheduled_time: scheduledTime || null,
-        pickup_address: pickup,
+        pickup_address: normalizedPickup,
         pickup_lat: pickupLat || null,
         pickup_lng: pickupLng || null,
-        dropoff_address: dropoff,
+        dropoff_address: normalizedDropoff,
         dropoff_lat: dropoffLat || null,
         dropoff_lng: dropoffLng || null,
         pickup_contact_name: pickupContactName || null,
@@ -841,14 +1075,14 @@ async function startServer() {
         package_size: packageSize,
         package_weight: packageWeight,
         notes: notes || null,
-        insurance: !!insurance,
-        promo_code: promoCode || null,
+        insurance: false,
+        promo_code: normalizedPromoCode || null,
         pricing_json: pricing,
         vat: pricing.vat,
         total: pricing.total,
         proof_otp: otp,
         tracking_code: trackingCode,
-        payment_method: paymentMethod || 'cash',
+        payment_method: normalizedPaymentMethod,
         cod_amount: codAmount || 0,
         eta_minutes: eta.etaMinutes,
         eta_text: eta.etaText,
@@ -858,6 +1092,7 @@ async function startServer() {
 
       await recordOrderEvent(String(order._id), 'customer', req.user.id, 'order_confirmed', 'draft', 'confirmed', 'Order confirmed');
       await createNotification(req.user.id, 'order_confirmed', 'Order confirmed', `Tracking ${order.tracking_code}`);
+      await createRoleNotifications(['dispatcher'], 'order_confirmed', 'New order awaiting dispatch', `Tracking ${order.tracking_code} is ready for assignment.`);
       const normalized = normalizeDoc(order);
       emitOrderUpdate(normalized);
       await autoDispatch(String(order._id));
@@ -967,6 +1202,9 @@ async function startServer() {
       const { category, description } = req.body;
       const order = await Order.findById(req.params.id).lean();
       if (!order) return res.status(404).json({ error: 'Order not found' });
+      if (order.status === 'completed') {
+        return res.status(400).json({ error: 'Completed deliveries cannot be reported as active issues.' });
+      }
       if (req.user.role === 'customer' && String(order.customer_id) !== req.user.id) {
         return res.status(403).json({ error: 'Forbidden' });
       }
@@ -986,6 +1224,7 @@ async function startServer() {
       await recordOrderEvent(String(order._id), req.user.role, req.user.id, 'issue_reported', order.status, order.status, category || 'issue');
       logAudit(req.user.id, req.user.role, 'ticket_created', 'ticket', Number(ticket._id), category || '');
       await createNotification(String(order.customer_id), 'support_ticket', 'Support ticket created', `Issue reported for order ${order.tracking_code || order.id}.`);
+      await createRoleNotifications(['dispatcher'], 'support_ticket', 'Delivery issue reported', `Issue reported for order ${order.tracking_code || order.id}.`);
       io.to('role_admin').emit('ticket_created', { orderId: String(order._id), ticketId: String(ticket._id) });
       res.json({ success: true, ticketId: String(ticket._id) });
     } catch (error) {
@@ -1065,6 +1304,7 @@ async function startServer() {
         logAudit(req.user.id, req.user.role, 'order_cancelled', 'order', Number(order._id), reason || '');
       }
       await createNotification(String(order.customer_id), 'order_cancelled', 'Order cancelled', `Order ${order.tracking_code || order.id} has been cancelled.`);
+      await createRoleNotifications(['dispatcher'], 'order_cancelled', 'Order cancelled', `Order ${order.tracking_code || order.id} has been cancelled.`);
       const updated = await Order.findById(id).lean();
       const normalized = normalizeDoc(updated);
       emitOrderUpdate(normalized);
@@ -1121,18 +1361,23 @@ async function startServer() {
       }
       if (status === 'picked_up') {
         await createNotification(String(order.customer_id), 'picked_up', 'Package picked up', `Order ${order.tracking_code || order.id} is on the way.`);
+        await createRoleNotifications(['dispatcher'], 'picked_up', 'Package picked up', `Order ${order.tracking_code || order.id} has been picked up.`);
       }
       if (status === 'in_transit') {
         await createNotification(String(order.customer_id), 'in_transit', 'Driver in transit', `Order ${order.tracking_code || order.id} is in transit.`);
+        await createRoleNotifications(['dispatcher'], 'in_transit', 'Driver in transit', `Order ${order.tracking_code || order.id} is in transit.`);
       }
       if (status === 'delivered') {
         await createNotification(String(order.customer_id), 'delivered', 'Delivery completed', `Order ${order.tracking_code || order.id} delivered.`);
+        await createRoleNotifications(['dispatcher'], 'delivered', 'Delivery completed', `Order ${order.tracking_code || order.id} has been delivered.`);
       }
       if (status === 'failed') {
         await createNotification(String(order.customer_id), 'delivery_failed', 'Delivery failed', `Order ${order.tracking_code || order.id} failed. Support will reach out.`);
+        await createRoleNotifications(['dispatcher'], 'delivery_failed', 'Delivery failed', `Order ${order.tracking_code || order.id} failed and needs follow-up.`);
       }
       if (status === 'returned') {
         await createNotification(String(order.customer_id), 'delivery_returned', 'Delivery returned', `Order ${order.tracking_code || order.id} has been returned.`);
+        await createRoleNotifications(['dispatcher'], 'delivery_returned', 'Delivery returned', `Order ${order.tracking_code || order.id} has been returned.`);
       }
       res.json(updated);
     } catch (error: any) {
@@ -1167,7 +1412,8 @@ async function startServer() {
       await recordOrderEvent(String(order._id), req.user.role, req.user.id, 'driver_assigned', order.status, 'driver_assigned', `Assigned to driver ${driverId}`);
       logAudit(req.user.id, req.user.role, 'driver_assigned', 'order', Number(order._id), `driver ${driverId}`);
       await createNotification(String(order.customer_id), 'driver_assigned', 'Driver assigned', `Driver assigned to order ${order.tracking_code || order.id}.`);
-      await createNotification(driverId, 'order_assigned', 'New delivery assigned', `Order ${order.tracking_code || order.id} assigned to you.`);
+      await createNotification(resolvedDriverId, 'order_assigned', 'New delivery assigned', `Order ${order.tracking_code || order.id} assigned to you.`);
+      await createRoleNotifications(['dispatcher'], 'driver_assigned', 'Driver assigned', `Driver assigned to order ${order.tracking_code || order.id}.`);
       const updated = await Order.findById(order._id).lean();
       const normalized = normalizeDoc(updated);
       emitOrderUpdate(normalized);
@@ -1205,6 +1451,7 @@ async function startServer() {
       const updated = await Order.findById(order._id).lean();
       await createNotification(String(order.customer_id), 'driver_assigned', 'Driver assigned', `Driver is on the way for order ${order.tracking_code || order.id}`);
       await createNotification(req.user.id, 'order_assigned', 'New delivery assigned', `Order ${order.tracking_code || order.id} assigned to you.`);
+      await createRoleNotifications(['dispatcher'], 'driver_assigned', 'Driver assigned', `Driver accepted order ${order.tracking_code || order.id}.`);
       const normalized = normalizeDoc(updated);
       emitOrderUpdate(normalized);
       res.json(normalized);
@@ -1382,7 +1629,8 @@ async function startServer() {
   app.get('/api/notifications', authenticateToken, async (req: any, res: any) => {
     try {
       const notifications = await Notification.find({ user_id: toObjectId(req.user.id) }).sort({ created_at: -1 }).limit(20).lean();
-      res.json(normalizeMany(notifications));
+      const normalized = normalizeMany(notifications);
+      res.json(dedupeNotifications(normalized));
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
     }
@@ -1540,7 +1788,7 @@ async function startServer() {
   // Admin Routes
   app.get('/api/users', authenticateToken, requireRole(['admin']), async (req: any, res: any) => {
     try {
-      const users = await User.find().select('name email role phone is_active').lean();
+      const users = await User.find().select('name email role phone is_active created_at updated_at password_updated_at last_login_at').lean();
       res.json(normalizeMany(users));
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1581,6 +1829,7 @@ async function startServer() {
         role,
         phone: phone || '',
         is_active: true,
+        password_updated_at: new Date(),
         created_at: new Date(),
         updated_at: new Date(),
       });
@@ -1601,7 +1850,7 @@ async function startServer() {
         await NotificationPreference.create({ user_id: user._id, inapp: true, sms: true, email: true });
       }
 
-      logAudit(req.user.id, req.user.role, 'user_created', 'user', Number(user._id), role);
+      logAudit(req.user.id, req.user.role, 'user_created', 'user', Number(user._id), role, getAuditMeta(req));
       res.json({ user: { id: String(user._id), name: user.name, email: user.email, role: user.role } });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1613,7 +1862,65 @@ async function startServer() {
       const { active } = req.body;
       const { id } = req.params;
       await User.findByIdAndUpdate(id, { is_active: !!active, updated_at: new Date() });
-      logAudit(req.user.id, req.user.role, 'user_status_update', 'user', Number(id), !!active ? 'active' : 'inactive');
+      logAudit(req.user.id, req.user.role, 'user_status_update', 'user', Number(id), !!active ? 'active' : 'inactive', getAuditMeta(req));
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.get('/api/admin/users/:id', authenticateToken, requireRole(['super_admin']), async (req: any, res: any) => {
+    try {
+      const user = await User.findById(req.params.id)
+        .select('name email role phone is_active created_at updated_at password_updated_at last_login_at password')
+        .lean();
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      const normalized = normalizeDoc(user);
+      normalized.password_hash = user.password || null;
+      delete normalized.password;
+      res.json(normalized);
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.put('/api/admin/users/:id/password', authenticateToken, requireRole(['super_admin']), async (req: any, res: any) => {
+    try {
+      const { password } = req.body;
+      if (!password || String(password).length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      }
+      const hashedPassword = await bcrypt.hash(String(password), 10);
+      const updatedUser = await User.findByIdAndUpdate(
+        req.params.id,
+        { password: hashedPassword, password_updated_at: new Date(), updated_at: new Date() },
+        { new: true }
+      ).select('password');
+      if (!updatedUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      const verified = await bcrypt.compare(String(password), updatedUser.password);
+      if (!verified) {
+        return res.status(500).json({ error: 'Password update verification failed.' });
+      }
+      logAudit(req.user.id, req.user.role, 'user_password_reset', 'user', Number(req.params.id), 'reset', getAuditMeta(req));
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.put('/api/admin/audit/:id/review', authenticateToken, requireRole(['super_admin']), async (req: any, res: any) => {
+    try {
+      const { status, note } = req.body;
+      const nextStatus = status || 'reviewed';
+      await AuditLog.findByIdAndUpdate(req.params.id, {
+        review_status: nextStatus,
+        review_note: note || null,
+        reviewed_by: toObjectId(req.user.id),
+        reviewed_at: new Date(),
+      });
+      logAudit(req.user.id, req.user.role, 'audit_reviewed', 'audit', Number(req.params.id), nextStatus, getAuditMeta(req));
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1642,7 +1949,7 @@ async function startServer() {
       const { id } = req.params;
       const { status } = req.body;
       await Driver.findByIdAndUpdate(id, { status, updated_at: new Date() });
-      logAudit(req.user.id, req.user.role, 'driver_status_update', 'driver', Number(id), status);
+      logAudit(req.user.id, req.user.role, 'driver_status_update', 'driver', Number(id), status, getAuditMeta(req));
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1675,7 +1982,7 @@ async function startServer() {
     try {
       const { status, note } = req.body;
       await SupportTicket.findByIdAndUpdate(req.params.id, { status, updated_at: new Date() });
-      logAudit(req.user.id, req.user.role, 'ticket_status_update', 'ticket', Number(req.params.id), note || status);
+      logAudit(req.user.id, req.user.role, 'ticket_status_update', 'ticket', Number(req.params.id), note || status, getAuditMeta(req));
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1697,7 +2004,7 @@ async function startServer() {
       const { name, status, latMin, latMax, lngMin, lngMax, message } = req.body;
       if (!name) return res.status(400).json({ error: 'Zone name required' });
       const zone = await Zone.create({ name, status: status || 'active', lat_min: latMin || null, lat_max: latMax || null, lng_min: lngMin || null, lng_max: lngMax || null, message: message || null });
-      logAudit(req.user.id, req.user.role, 'zone_created', 'zone', Number(zone._id), name);
+      logAudit(req.user.id, req.user.role, 'zone_created', 'zone', Number(zone._id), name, getAuditMeta(req));
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1708,7 +2015,7 @@ async function startServer() {
     try {
       const { status, message } = req.body;
       await Zone.findByIdAndUpdate(req.params.id, { status, message: message || null });
-      logAudit(req.user.id, req.user.role, 'zone_updated', 'zone', Number(req.params.id), status);
+      logAudit(req.user.id, req.user.role, 'zone_updated', 'zone', Number(req.params.id), status, getAuditMeta(req));
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1739,7 +2046,7 @@ async function startServer() {
         active: !!active,
         created_at: new Date(),
       });
-      logAudit(req.user.id, req.user.role, 'promo_created', 'promo', Number(promo._id), code);
+      logAudit(req.user.id, req.user.role, 'promo_created', 'promo', Number(promo._id), code, getAuditMeta(req));
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1750,7 +2057,7 @@ async function startServer() {
     try {
       const { active } = req.body;
       await Promo.findByIdAndUpdate(req.params.id, { active: !!active });
-      logAudit(req.user.id, req.user.role, 'promo_updated', 'promo', Number(req.params.id), active ? 'active' : 'inactive');
+      logAudit(req.user.id, req.user.role, 'promo_updated', 'promo', Number(req.params.id), active ? 'active' : 'inactive', getAuditMeta(req));
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
@@ -1779,7 +2086,7 @@ async function startServer() {
         active: true,
         created_at: new Date(),
       });
-      logAudit(req.user.id, req.user.role, 'pricing_rule_created', 'pricing_rule', Number(rule._id), zoneName || '');
+      logAudit(req.user.id, req.user.role, 'pricing_rule_created', 'pricing_rule', Number(rule._id), zoneName || '', getAuditMeta(req));
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
