@@ -1,7 +1,10 @@
 export type ApiError = { error: string };
 
 export const apiFetch = async (path: string, options: RequestInit = {}) => {
-  const baseURL = import.meta.env.VITE_API_URL || "";
+  const baseURL = import.meta.env.VITE_API_URL;
+  if (!baseURL) {
+    throw new Error('VITE_API_URL is not set in frontend/.env');
+  }
   const token = localStorage.getItem('token');
   const headers = new Headers(options.headers || {});
   if (token) headers.set('Authorization', `Bearer ${token}`);
