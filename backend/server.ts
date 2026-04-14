@@ -607,6 +607,11 @@ async function startServer() {
     }
   });
 
+  // Temporary GET probe to debug 404s when browsers hit the login endpoint incorrectly.
+  app.get('/api/auth/login', (req, res) => {
+    res.send('Login route is working (GET test)');
+  });
+
   app.post('/api/auth/forgot-password/request', async (req, res) => {
     try {
       const email = String(req.body?.email || '').toLowerCase().trim();
